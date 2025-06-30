@@ -34,3 +34,13 @@ func NewBloomRing() BloomRing {
 	)
 	return BloomRing{ss_bloomring.NewBloomRing(DefaultSFSlot, DefaultSFCapacity, DefaultSFFPR), &sync.Mutex{}}
 }
+
+// 🔴 新增：更小的Bloom Filter用于大量用户场景
+func NewSmallBloomRing() BloomRing {
+	const (
+		SmallSFCapacity = 1e4  // 减少容量
+		SmallSFFPR      = 1e-4 // 稍微提高误判率
+		SmallSFSlot     = 5    // 减少槽位
+	)
+	return BloomRing{ss_bloomring.NewBloomRing(SmallSFSlot, SmallSFCapacity, SmallSFFPR), &sync.Mutex{}}
+}

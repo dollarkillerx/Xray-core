@@ -6,8 +6,9 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/sha1"
-	"google.golang.org/protobuf/proto"
 	"io"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/antireplay"
@@ -27,6 +28,10 @@ type MemoryAccount struct {
 	Password   string
 
 	replayFilter antireplay.GeneralizedReplayFilter
+
+	// 🔴 新增：性能优化配置
+	EnableCache bool // 是否启用AEAD缓存
+	CacheSize   int  // 缓存大小限制
 }
 
 var ErrIVNotUnique = errors.New("IV is not unique")
@@ -123,7 +128,7 @@ func (a *Account) AsAccount() (protocol.Account, error) {
 		Password:   a.Password,
 		replayFilter: func() antireplay.GeneralizedReplayFilter {
 			if a.IvCheck {
-				return antireplay.NewBloomRing()
+				return antireplay.NewSmallBloomRing()
 			}
 			return nil
 		}(),
