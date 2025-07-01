@@ -8,6 +8,7 @@ import (
 	"hash/crc64"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/common/dice"
 	"github.com/xtls/xray-core/common/errors"
@@ -16,40 +17,47 @@ import (
 
 // Validator stores valid Shadowsocks users.
 type Validator struct {
-	sync.RWMutex
-	users []*protocol.MemoryUser
+	users sync.Map // 使用 sync.Map 存储用户，key 为 email，value 为 *protocol.MemoryUser
 
 	behaviorSeed  uint64
 	behaviorFused bool
 
-	hotCache []*protocol.MemoryUser
+	hotCache sync.Map // 使用 sync.Map 存储热点用户，key 为 email，value 为 *protocol.MemoryUser
 }
 
 var ErrNotFound = errors.New("Not Found")
 
 // Add a Shadowsocks user.
 func (v *Validator) Add(u *protocol.MemoryUser) error {
-	v.Lock()
-	defer v.Unlock()
-
-	account := u.Account.(*MemoryAccount)
-	if !account.Cipher.IsAEAD() && len(v.users) > 0 {
-		return errors.New("The cipher is not support Single-port Multi-user")
+	account, ok := u.Account.(*MemoryAccount)
+	if !ok {
+		return errors.New("invalid account type")
 	}
-	v.users = append(v.users, u)
 
+	// 检查是否支持多用户
+	if !account.Cipher.IsAEAD() {
+		// 检查是否已有其他用户
+		hasOtherUser := false
+		v.users.Range(func(key, value interface{}) bool {
+			hasOtherUser = true
+			return false // 停止遍历
+		})
+		if hasOtherUser {
+			return errors.New("The cipher is not support Single-port Multi-user")
+		}
+	}
+
+	// 添加用户到 sync.Map
+	v.users.Store(strings.ToLower(u.Email), u)
+
+	// 更新 behavior seed
 	if !v.behaviorFused {
 		hashkdf := hmac.New(sha256.New, []byte("SSBSKDF"))
 		hashkdf.Write(account.Key)
-		v.behaviorSeed = crc64.Update(v.behaviorSeed, crc64.MakeTable(crc64.ECMA), hashkdf.Sum(nil))
+		atomic.AddUint64(&v.behaviorSeed, crc64.Update(0, crc64.MakeTable(crc64.ECMA), hashkdf.Sum(nil)))
 	}
 
-	// 初始化 hotCache
-	if v.hotCache == nil {
-		v.hotCache = make([]*protocol.MemoryUser, 0)
-		fmt.Println("-------------------- hotCache init --------------------")
-	}
-
+	fmt.Println("-------------------- hotCache init --------------------")
 	return nil
 }
 
@@ -59,57 +67,18 @@ func (v *Validator) Del(email string) error {
 		return errors.New("Email must not be empty.")
 	}
 
-	v.Lock()
-	defer v.Unlock()
-
 	email = strings.ToLower(email)
-	idx := -1
-	for i, u := range v.users {
-		if strings.EqualFold(u.Email, email) {
-			idx = i
-			break
-		}
-	}
 
-	if idx == -1 {
+	// 从 users 中删除
+	if _, loaded := v.users.LoadAndDelete(email); !loaded {
 		return errors.New("User ", email, " not found.")
 	}
-	ulen := len(v.users)
 
-	// 保存被删除用户的 email，用于清理 hotCache
-	deletedEmail := v.users[idx].Email
-
-	v.users[idx] = v.users[ulen-1]
-	v.users[ulen-1] = nil
-	v.users = v.users[:ulen-1]
-
-	// 删除 hotCache 中对应的条目
-	v.deleteHotCache(deletedEmail)
+	// 从 hotCache 中删除
+	v.hotCache.Delete(email)
 	fmt.Println("-------------------- hotCache delete --------------------")
 
 	return nil
-}
-
-func (v *Validator) deleteHotCache(email string) {
-	for i, user := range v.hotCache {
-		if user.Email == email {
-			// 从 slice 中删除元素
-			v.hotCache = append(v.hotCache[:i], v.hotCache[i+1:]...)
-			break
-		}
-	}
-}
-
-func (v *Validator) addToHotCache(user *protocol.MemoryUser) {
-	// 检查用户是否已经在 hotCache 中
-	for _, cachedUser := range v.hotCache {
-		if cachedUser.Email == user.Email {
-			return // 已存在，不需要重复添加
-		}
-	}
-
-	// 添加到 hotCache 开头（最近使用的用户）
-	v.hotCache = append([]*protocol.MemoryUser{user}, v.hotCache...)
 }
 
 // GetByEmail Get a Shadowsocks user with a non-empty Email.
@@ -118,32 +87,31 @@ func (v *Validator) GetByEmail(email string) *protocol.MemoryUser {
 		return nil
 	}
 
-	v.Lock()
-	defer v.Unlock()
-
 	email = strings.ToLower(email)
-	for _, u := range v.users {
-		if strings.EqualFold(u.Email, email) {
-			return u
-		}
+	if user, ok := v.users.Load(email); ok {
+		return user.(*protocol.MemoryUser)
 	}
 	return nil
 }
 
 // GetAll get all users
 func (v *Validator) GetAll() []*protocol.MemoryUser {
-	v.Lock()
-	defer v.Unlock()
-	dst := make([]*protocol.MemoryUser, len(v.users))
-	copy(dst, v.users)
-	return dst
+	var users []*protocol.MemoryUser
+	v.users.Range(func(key, value interface{}) bool {
+		users = append(users, value.(*protocol.MemoryUser))
+		return true
+	})
+	return users
 }
 
 // GetCount get users count
 func (v *Validator) GetCount() int64 {
-	v.Lock()
-	defer v.Unlock()
-	return int64(len(v.users))
+	var count int64
+	v.users.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+	return count
 }
 
 // Get 根据传入的数据包获取匹配的 Shadowsocks 用户
@@ -158,34 +126,41 @@ func (v *Validator) GetCount() int64 {
 //   - ivLen: 初始化向量长度
 //   - err: 错误信息
 func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol.MemoryUser, aead cipher.AEAD, ret []byte, ivLen int32, err error) {
-	// 获取读锁，允许多个并发读取
-	v.RLock()
-	defer v.RUnlock()
-
-	fmt.Println("-------------------- hotCache len --------------------", len(v.hotCache))
+	// 获取 hotCache 长度
+	var cacheLen int64
+	v.hotCache.Range(func(key, value interface{}) bool {
+		cacheLen++
+		return true
+	})
+	fmt.Println("-------------------- hotCache len --------------------", cacheLen)
 
 	// 首先检查 hotCache 中的用户
-	for _, user := range v.hotCache {
+	v.hotCache.Range(func(key, value interface{}) bool {
+		user, ok := value.(*protocol.MemoryUser)
+		if !ok {
+			return true // 继续遍历，跳过无效类型
+		}
 		account, ok := user.Account.(*MemoryAccount)
 		if !ok {
-			continue // 跳过无效账户类型
+			return true // 继续遍历
 		}
+
 		if account.Cipher.IsAEAD() {
 			// AEAD 模式：需要至少 32 字节的数据包才能进行解密
 			if len(bs) < 32 {
-				continue
+				return true // 继续遍历
 			}
 
 			// 获取 AEAD 加密器
 			aeadCipher, ok := account.Cipher.(*AEADCipher)
 			if !ok {
-				continue // 跳过无效加密器类型
+				return true // 继续遍历
 			}
 			// 获取初始化向量长度
 			ivLen = aeadCipher.IVSize()
 			// 检查数据包长度是否足够
 			if len(bs) < int(ivLen) {
-				continue
+				return true // 继续遍历
 			}
 			// 从数据包开头提取初始化向量
 			iv := bs[:ivLen]
@@ -217,40 +192,50 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 				// 检查 IV 是否有效（防止重放攻击）
 				err = account.CheckIV(iv)
 				fmt.Println("-------------------- 缓存命中 用户", user.Email, "--------------------")
-				return
+				return false // 停止遍历
 			}
 		} else {
 			// 非 AEAD 模式：直接返回用户（单用户模式）
 			u = user
-			ivLen = user.Account.(*MemoryAccount).Cipher.IVSize()
-			return
+			ivLen = account.Cipher.IVSize() // 使用已检查的 account
+			return false                    // 停止遍历
 		}
+		return true // 继续遍历
+	})
+
+	if u != nil {
+		return // 在 hotCache 中找到匹配用户
 	}
 
 	fmt.Println("-------------------- 缓存未命中 --------------------")
 
 	// 遍历所有用户，尝试匹配
-	for _, user := range v.users {
+	v.users.Range(func(key, value interface{}) bool {
+		user, ok := value.(*protocol.MemoryUser)
+		if !ok {
+			return true // 继续遍历，跳过无效类型
+		}
 		account, ok := user.Account.(*MemoryAccount)
 		if !ok {
-			continue // 跳过无效账户类型
+			return true // 继续遍历
 		}
+
 		if account.Cipher.IsAEAD() {
 			// AEAD 模式：需要至少 32 字节的数据包才能进行解密
 			if len(bs) < 32 {
-				continue
+				return true // 继续遍历
 			}
 
 			// 获取 AEAD 加密器
 			aeadCipher, ok := account.Cipher.(*AEADCipher)
 			if !ok {
-				continue // 跳过无效加密器类型
+				return true // 继续遍历
 			}
 			// 获取初始化向量长度
 			ivLen = aeadCipher.IVSize()
 			// 检查数据包长度是否足够
 			if len(bs) < int(ivLen) {
-				continue
+				return true // 继续遍历
 			}
 			// 从数据包开头提取初始化向量
 			iv := bs[:ivLen]
@@ -282,29 +267,28 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 				// 检查 IV 是否有效（防止重放攻击）
 				err = account.CheckIV(iv)
 
-				// 将用户添加到 hotCache（需要写锁）
-				v.addToHotCache(user)
+				// 将用户添加到 hotCache
+				v.hotCache.Store(user.Email, user)
 				fmt.Println("-------------------- 缓存记录 用户", user.Email, "--------------------")
-				return
+				return false // 停止遍历
 			}
 		} else {
 			// 非 AEAD 模式：直接返回用户（单用户模式）
 			u = user
-			ivLen = user.Account.(*MemoryAccount).Cipher.IVSize()
-			// 注释掉的 IV 检查：None 加密的 IV 大小为 0
-			// err = user.Account.(*MemoryAccount).CheckIV(bs[:ivLen])
-			return
+			ivLen = account.Cipher.IVSize() // 使用已检查的 account
+			return false                    // 停止遍历
 		}
-	}
+		return true // 继续遍历
+	})
 
 	// 没有找到匹配的用户
-	return nil, nil, nil, 0, ErrNotFound
+	if u == nil {
+		return nil, nil, nil, 0, ErrNotFound
+	}
+	return
 }
 
 func (v *Validator) GetBehaviorSeed() uint64 {
-	v.Lock()
-	defer v.Unlock()
-
 	v.behaviorFused = true
 	if v.behaviorSeed == 0 {
 		v.behaviorSeed = dice.RollUint64()
