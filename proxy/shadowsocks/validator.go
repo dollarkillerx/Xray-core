@@ -4,6 +4,7 @@ import (
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha256"
+	"fmt"
 	"hash/crc64"
 	"strings"
 	"sync"
@@ -46,6 +47,7 @@ func (v *Validator) Add(u *protocol.MemoryUser) error {
 	// 初始化 hotCache
 	if v.hotCache == nil {
 		v.hotCache = make([]*protocol.MemoryUser, 0)
+		fmt.Println("-------------------- hotCache init --------------------")
 	}
 
 	return nil
@@ -83,6 +85,7 @@ func (v *Validator) Del(email string) error {
 
 	// 删除 hotCache 中对应的条目
 	v.deleteHotCache(deletedEmail)
+	fmt.Println("-------------------- hotCache delete --------------------")
 
 	return nil
 }
@@ -159,6 +162,8 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 	v.RLock()
 	defer v.RUnlock()
 
+	fmt.Println("-------------------- hotCache len --------------------", len(v.hotCache))
+
 	// 首先检查 hotCache 中的用户
 	for _, user := range v.hotCache {
 		account, ok := user.Account.(*MemoryAccount)
@@ -211,6 +216,7 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 				u = user
 				// 检查 IV 是否有效（防止重放攻击）
 				err = account.CheckIV(iv)
+				fmt.Println("-------------------- 缓存命中 用户", user.Email, "--------------------")
 				return
 			}
 		} else {
@@ -220,6 +226,8 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 			return
 		}
 	}
+
+	fmt.Println("-------------------- 缓存未命中 --------------------")
 
 	// 遍历所有用户，尝试匹配
 	for _, user := range v.users {
@@ -276,6 +284,7 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 
 				// 将用户添加到 hotCache（需要写锁）
 				v.addToHotCache(user)
+				fmt.Println("-------------------- 缓存记录 用户", user.Email, "--------------------")
 				return
 			}
 		} else {
