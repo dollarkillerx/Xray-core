@@ -47,6 +47,24 @@ func NewValidator() *Validator {
 	}
 }
 
+// ensureCacheInitialized 确保缓存映射已初始化
+func (v *Validator) ensureCacheInitialized() {
+	if v.validCache == nil {
+		v.validCache = make(map[string]*CacheEntry)
+	}
+	if v.expiredCache == nil {
+		v.expiredCache = make(map[string]*CacheEntry)
+	}
+	if v.cacheTTL == 0 {
+		v.cacheTTL = time.Hour // 默认1小时
+	}
+}
+
+// isCacheInitialized 检查缓存是否已初始化（只读操作）
+func (v *Validator) isCacheInitialized() bool {
+	return v.validCache != nil && v.expiredCache != nil && v.cacheTTL != 0
+}
+
 // generateCacheKey 生成缓存key
 func (v *Validator) generateCacheKey(bs []byte, command protocol.RequestCommand) string {
 	// 使用前32字节作为key的一部分，加上命令类型
@@ -61,6 +79,9 @@ func (v *Validator) generateCacheKey(bs []byte, command protocol.RequestCommand)
 func (v *Validator) cleanupExpiredCache() {
 	v.cacheMutex.Lock()
 	defer v.cacheMutex.Unlock()
+
+	// 确保缓存映射已初始化
+	v.ensureCacheInitialized()
 
 	now := time.Now()
 
@@ -84,6 +105,9 @@ func (v *Validator) cleanupExpiredCache() {
 func (v *Validator) checkAndRestoreExpiredCache() {
 	v.cacheMutex.Lock()
 	defer v.cacheMutex.Unlock()
+
+	// 确保缓存映射已初始化
+	v.ensureCacheInitialized()
 
 	// 检查过期缓存中的用户是否仍然在当前users列表中
 	for key, entry := range v.expiredCache {
@@ -111,6 +135,9 @@ func (v *Validator) checkAndRestoreExpiredCache() {
 func (v *Validator) cleanupUserCache(user *protocol.MemoryUser) {
 	v.cacheMutex.Lock()
 	defer v.cacheMutex.Unlock()
+
+	// 确保缓存映射已初始化
+	v.ensureCacheInitialized()
 
 	// 清理有效缓存中与该用户相关的条目
 	for key, entry := range v.validCache {
@@ -238,7 +265,8 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 
 	// 5. 先检查有效缓存
 	v.cacheMutex.RLock()
-	if entry, exists := v.validCache[cacheKey]; exists {
+	if v.isCacheInitialized() && v.validCache[cacheKey] != nil {
+		entry := v.validCache[cacheKey]
 		// 找到有效缓存，延长过期时间
 		entry.expires = time.Now().Add(v.cacheTTL)
 		v.cacheMutex.RUnlock()
@@ -315,6 +343,7 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 
 				// 7. 找到匹配的用户，添加到缓存
 				v.cacheMutex.Lock()
+				v.ensureCacheInitialized()
 				v.validCache[cacheKey] = &CacheEntry{
 					user:    user,
 					aead:    aead,
@@ -331,6 +360,7 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 
 			// 对于非AEAD加密，也添加到缓存
 			v.cacheMutex.Lock()
+			v.ensureCacheInitialized()
 			v.validCache[cacheKey] = &CacheEntry{
 				user:    user,
 				aead:    nil,
@@ -344,6 +374,7 @@ func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol
 
 	// 8. 全量遍历未找到匹配用户，添加到过期缓存
 	v.cacheMutex.Lock()
+	v.ensureCacheInitialized()
 	v.expiredCache[cacheKey] = &CacheEntry{
 		user:    nil, // 没有找到用户
 		aead:    nil,
@@ -370,6 +401,9 @@ func (v *Validator) GetCacheStats() (validCount, expiredCount int) {
 	v.cacheMutex.RLock()
 	defer v.cacheMutex.RUnlock()
 
+	// 确保缓存映射已初始化
+	v.ensureCacheInitialized()
+
 	validCount = len(v.validCache)
 	expiredCount = len(v.expiredCache)
 	return
@@ -379,6 +413,9 @@ func (v *Validator) GetCacheStats() (validCount, expiredCount int) {
 func (v *Validator) ClearCache() {
 	v.cacheMutex.Lock()
 	defer v.cacheMutex.Unlock()
+
+	// 确保缓存映射已初始化
+	v.ensureCacheInitialized()
 
 	v.validCache = make(map[string]*CacheEntry)
 	v.expiredCache = make(map[string]*CacheEntry)
@@ -396,6 +433,10 @@ func (v *Validator) SetCacheTTL(ttl time.Duration) {
 func (v *Validator) isKeyInExpiredCache(cacheKey string) bool {
 	v.cacheMutex.RLock()
 	defer v.cacheMutex.RUnlock()
+
+	if !v.isCacheInitialized() {
+		return false
+	}
 
 	_, exists := v.expiredCache[cacheKey]
 	return exists

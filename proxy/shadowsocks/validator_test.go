@@ -75,3 +75,36 @@ func TestValidatorCacheCleanup(t *testing.T) {
 		t.Error("过期的条目应该存在于过期缓存中")
 	}
 }
+
+// TestValidatorNilMapPanic 测试修复nil map panic的问题
+func TestValidatorNilMapPanic(t *testing.T) {
+	// 创建一个没有通过NewValidator初始化的Validator
+	v := &Validator{}
+
+	// 这些操作应该不会panic
+	validCount, expiredCount := v.GetCacheStats()
+	if validCount != 0 || expiredCount != 0 {
+		t.Errorf("未初始化的缓存统计错误: valid=%d, expired=%d", validCount, expiredCount)
+	}
+
+	// 测试过期缓存检查
+	cacheKey := "test_key"
+	if v.isKeyInExpiredCache(cacheKey) {
+		t.Error("未初始化的缓存中不应该找到key")
+	}
+
+	// 测试清理缓存
+	v.ClearCache()
+
+	// 测试添加用户（应该自动初始化缓存）
+	// 这里我们创建一个模拟的用户来测试Add方法
+	// 注意：这里只是测试缓存初始化，不测试实际的用户添加逻辑
+	v.cleanupExpiredCache()
+	v.checkAndRestoreExpiredCache()
+
+	// 再次检查缓存统计
+	validCount, expiredCount = v.GetCacheStats()
+	if validCount != 0 || expiredCount != 0 {
+		t.Errorf("清理后缓存统计错误: valid=%d, expired=%d", validCount, expiredCount)
+	}
+}
